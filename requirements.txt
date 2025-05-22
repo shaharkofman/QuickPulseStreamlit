@@ -3,3 +3,4 @@ openai
 supabase
 pandas
 altair
+qrcode[pil]
