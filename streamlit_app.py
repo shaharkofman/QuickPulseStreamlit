@@ -3,99 +3,112 @@ from openai import OpenAI
 from supabase import create_client, Client
 import pandas as pd
 import altair as alt
-import json
-import uuid
+import json, uuid, qrcode
+from io import BytesIO
 from datetime import datetime
 
-# ====== CONFIG ======
+# === Setup ===
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-supabase_url = st.secrets["SUPABASE_URL"]
-supabase_key = st.secrets["SUPABASE_KEY"]
-supabase: Client = create_client(supabase_url, supabase_key)
+supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-# ====== SESSION ======
-if "quiz" not in st.session_state:
-    st.session_state.quiz = []
-if "mode" not in st.session_state:
-    st.session_state.mode = "student"
+st.title("QuickPulse – AI Quiz System")
 
-# ====== HEADER ======
-st.title("QuickPulse AI Quiz System")
+mode = st.radio("Choose mode:", ["Teacher", "Student"])
 
-mode = st.radio("Choose mode:", ["Student", "Teacher"])
-st.session_state.mode = mode.lower()
+# === QR Code Helper ===
+def show_qr(link):
+    qr = qrcode.make(link)
+    buf = BytesIO()
+    qr.save(buf)
+    st.image(buf.getvalue(), caption="Scan this QR to answer the quiz")
 
-# ====== STUDENT MODE ======
-if st.session_state.mode == "student":
-    name = st.text_input("Enter your name:")
-    topic = st.text_input("Enter a topic (e.g. Fractions)")
-
-    if st.button("Generate Quiz"):
-        with st.spinner("Generating quiz..."):
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are a helpful quiz generator. Always respond ONLY in strict JSON format."},
-                        {"role": "user", "content": f"""Generate 3 multiple choice questions about {topic}.
-Each question should be an object with:
-- "question": the question string
-- "options": a list of 4 choices
-- "answer": the correct option string
-
-Respond ONLY as a JSON array like this:
-
+# === Teacher Mode ===
+if mode == "Teacher":
+    topic = st.text_input("Enter topic (e.g. Fractions)")
+    if st.button("Generate AI Quiz"):
+        with st.spinner("Creating quiz..."):
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a helpful quiz generator. Respond with a JSON array of 3 MCQs."},
+                    {"role": "user", "content": f"""Generate 3 multiple choice questions on {topic}. Format:
 [
   {{
-    "question": "What is 2+2?",
-    "options": ["1", "2", "3", "4"],
-    "answer": "4"
+    "question": "...",
+    "options": ["A", "B", "C", "D"],
+    "answer": "B"
   }},
   ...
 ]"""}
-                    ]
-                )
-                content = response.choices[0].message.content
-                st.code(content, language="json")
-                st.session_state.quiz = json.loads(content)
+                ]
+            )
+            quiz_json = response.choices[0].message.content
+            try:
+                parsed = json.loads(quiz_json)
+                st.success("Quiz created!")
+                st.write(parsed)
+
+                # Save quiz to DB
+                quiz_id = str(uuid.uuid4())
+                supabase.table("quizzes").insert({
+                    "quiz_id": quiz_id,
+                    "topic": topic,
+                    "questions": parsed
+                }).execute()
+
+                quiz_link = f"{st.secrets['APP_BASE_URL']}?quiz_id={quiz_id}"
+                st.write("📎 Quiz Link:", quiz_link)
+                show_qr(quiz_link)
+
             except json.JSONDecodeError:
-                st.error("⚠️ Failed to parse AI response. Try again or check format.")
-            except Exception as e:
-                st.error(f"OpenAI Error: {e}")
+                st.error("Invalid response from OpenAI.")
 
-    for i, q in enumerate(st.session_state.quiz):
-        st.subheader(f"Q{i+1}: {q['question']}")
-        choice = st.radio("Choose:", q["options"], key=f"q_{i}")
+    # Optional: show past quizzes & heatmap
+    if st.checkbox("View Results"):
+        quizzes = supabase.table("quizzes").select("*").order("created_at", desc=True).limit(5).execute().data
+        for q in quizzes:
+            st.subheader(f"{q['topic']} (ID: {q['quiz_id'][:8]})")
+            res = supabase.table("quiz_results").select("*").eq("quiz_id", q["quiz_id"]).execute().data
+            if not res:
+                st.info("No responses yet.")
+                continue
+            df = pd.DataFrame(res)
+            pivot = df.pivot_table(index="student_id", columns="question_text", values="is_correct", aggfunc="max")
+            melted = pivot.reset_index().melt(id_vars="student_id", var_name="question", value_name="correct")
+            chart = alt.Chart(melted).mark_rect().encode(
+                x="question:N",
+                y="student_id:N",
+                color=alt.Color("correct:N", scale=alt.Scale(domain=[True, False], range=["red", "green"]))
+            ).properties(width=600)
+            st.altair_chart(chart)
 
-        if st.button(f"Submit Q{i+1}", key=f"submit_{i}"):
-            is_correct = (choice == q["answer"])
-            st.success("✅ Correct!" if is_correct else f"❌ Wrong! Correct answer: {q['answer']}")
-            supabase.table("quiz_results").insert({
-                "id": str(uuid.uuid4()),
-                "student_id": name or "anonymous",
-                "question_text": q["question"],
-                "correct_answer": q["answer"],
-                "student_answer": choice,
-                "is_correct": is_correct,
-                "timestamp": datetime.utcnow().isoformat()
-            }).execute()
+# === Student Mode ===
+if mode == "Student":
+    query_params = st.experimental_get_query_params()
+    quiz_id = query_params.get("quiz_id", [None])[0]
+    name = st.text_input("Enter your name:")
 
-# ====== TEACHER MODE ======
-if st.session_state.mode == "teacher":
-    st.header("📊 Class Performance Heatmap")
-    res = supabase.table("quiz_results").select("*").execute()
-    df = pd.DataFrame(res.data)
-
-    if df.empty:
-        st.info("No data yet.")
+    if quiz_id:
+        quiz_data = supabase.table("quizzes").select("*").eq("quiz_id", quiz_id).execute().data
+        if not quiz_data:
+            st.error("Invalid or expired quiz link.")
+        else:
+            questions = quiz_data[0]["questions"]
+            for i, q in enumerate(questions):
+                st.subheader(f"Q{i+1}: {q['question']}")
+                choice = st.radio("Your answer:", q["options"], key=f"q_{i}")
+                if st.button(f"Submit Q{i+1}", key=f"s_{i}"):
+                    is_correct = (choice == q["answer"])
+                    st.success("✅ Correct!" if is_correct else f"❌ Wrong! Answer: {q['answer']}")
+                    supabase.table("quiz_results").insert({
+                        "id": str(uuid.uuid4()),
+                        "student_id": name or "anonymous",
+                        "quiz_id": quiz_id,
+                        "question_text": q["question"],
+                        "correct_answer": q["answer"],
+                        "student_answer": choice,
+                        "is_correct": is_correct,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }).execute()
     else:
-        pivot = df.pivot_table(index="student_id", columns="question_text", values="is_correct", aggfunc="max")
-        chart_df = pivot.reset_index().melt(id_vars="student_id", var_name="question", value_name="correct")
-
-        chart = alt.Chart(chart_df).mark_rect().encode(
-            x=alt.X("question:N", title="Question"),
-            y=alt.Y("student_id:N", title="Student"),
-            color=alt.Color("correct:N", scale=alt.Scale(domain=[True, False], range=["green", "red"]))
-        ).properties(width=600)
-
-        st.altair_chart(chart, use_container_width=True)
+        st.info("No quiz ID found. Please scan a QR code or use a shared link.")
