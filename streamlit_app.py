@@ -3,7 +3,7 @@ from openai import OpenAI
 from supabase import create_client, Client
 import pandas as pd
 import altair as alt
-import os
+import json
 import uuid
 from datetime import datetime
 
@@ -28,24 +28,40 @@ st.session_state.mode = mode.lower()
 # ====== STUDENT MODE ======
 if st.session_state.mode == "student":
     name = st.text_input("Enter your name:")
-
     topic = st.text_input("Enter a topic (e.g. Fractions)")
 
     if st.button("Generate Quiz"):
         with st.spinner("Generating quiz..."):
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a helpful teacher."},
-                    {"role": "user", "content": f"Write 3 multiple choice questions about {topic}. Each should have 1 correct answer and 3 distractors. Format each as JSON with question, options, and answer."}
-                ]
-            )
-            content = response.choices[0].message.content
             try:
-                # NOTE: You should expect formatted JSON from OpenAI, but here's a fallback
-                st.session_state.quiz = eval(content) if isinstance(content, str) else content
-            except Exception:
-                st.error("Failed to parse AI output. Try again.")
+                response = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are a helpful quiz generator. Always respond ONLY in strict JSON format."},
+                        {"role": "user", "content": f"""Generate 3 multiple choice questions about {topic}.
+Each question should be an object with:
+- "question": the question string
+- "options": a list of 4 choices
+- "answer": the correct option string
+
+Respond ONLY as a JSON array like this:
+
+[
+  {{
+    "question": "What is 2+2?",
+    "options": ["1", "2", "3", "4"],
+    "answer": "4"
+  }},
+  ...
+]"""}
+                    ]
+                )
+                content = response.choices[0].message.content
+                st.code(content, language="json")
+                st.session_state.quiz = json.loads(content)
+            except json.JSONDecodeError:
+                st.error("⚠️ Failed to parse AI response. Try again or check format.")
+            except Exception as e:
+                st.error(f"OpenAI Error: {e}")
 
     for i, q in enumerate(st.session_state.quiz):
         st.subheader(f"Q{i+1}: {q['question']}")
@@ -53,7 +69,7 @@ if st.session_state.mode == "student":
 
         if st.button(f"Submit Q{i+1}", key=f"submit_{i}"):
             is_correct = (choice == q["answer"])
-            st.success("Correct!" if is_correct else f"Wrong! Correct answer: {q['answer']}")
+            st.success("✅ Correct!" if is_correct else f"❌ Wrong! Correct answer: {q['answer']}")
             supabase.table("quiz_results").insert({
                 "id": str(uuid.uuid4()),
                 "student_id": name or "anonymous",
