@@ -1,5 +1,5 @@
 import streamlit as st
-import openai
+from openai import OpenAI
 from supabase import create_client, Client
 import pandas as pd
 import altair as alt
@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 
 # ====== CONFIG ======
-openai.api_key = st.secrets["OPENAI_API_KEY"]
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 supabase_url = st.secrets["SUPABASE_URL"]
 supabase_key = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(supabase_url, supabase_key)
@@ -33,7 +33,7 @@ if st.session_state.mode == "student":
 
     if st.button("Generate Quiz"):
         with st.spinner("Generating quiz..."):
-            response = openai.ChatCompletion.create(
+            response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": "You are a helpful teacher."},
