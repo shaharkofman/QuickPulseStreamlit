@@ -78,7 +78,7 @@ if mode == "Teacher":
             chart = alt.Chart(melted).mark_rect().encode(
                 x="question:N",
                 y="student_id:N",
-                color=alt.Color("correct:N", scale=alt.Scale(domain=[True, False], range=["red", "green"]))
+            color=alt.Color("correct:N", scale=alt.Scale(domain=[True, False], range=["green", "red"]))
             ).properties(width=600)
             st.altair_chart(chart)
 
